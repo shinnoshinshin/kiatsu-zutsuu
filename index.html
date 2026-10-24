@@ -189,7 +189,7 @@
     </div>
   </section>
 
-  <div class="muted foot">判定: 6時間ごとに、前後12時間の海面気圧の下がり幅で評価（−3.1で注意、−4.2で警戒）<br>気象データ: Open-Meteo.com ／ 記録はこの端末のブラウザ内だけに保存されます。医療的な診断ではありません。</div>
+  <div class="muted foot">判定: 6時間ごとに、その12時間前〜6時間後の海面気圧の下がり幅で評価（−6.2で注意、−7.8で警戒）<br>気象データ: Open-Meteo.com ／ 記録はこの端末のブラウザ内だけに保存されます。医療的な診断ではありません。</div>
 </main>
 
 <nav>
@@ -215,7 +215,7 @@
 <script>
 const $ = id => document.getElementById(id);
 const LOG_KEY = "zutsuu-log-v1", LOC_KEY = "zutsuu-loc-v1";
-const HW = 26, PADL = 46;           // 1時間あたりの幅, 左の目盛り幅
+const HW = window.innerWidth < 600 ? 14 : 22, PADL = 46;          // 1時間あたりの幅, 左の目盛り幅
 let series = [], selIdx = null;
 const WD = ["日","月","火","水","木","金","土"];
 const LV = {
@@ -224,13 +224,14 @@ const LV = {
   warn:  { name:"注意",     mark:"!", color:"var(--warn)" },
   alert: { name:"警戒",     mark:"!!", color:"var(--alert)" },
 };
-// 判定ルール：6時間ごと（3/9/15/21時区切り）の区間を、区間をはさむ12時間の気圧変化で評価
-const TH = { alert: -4.2, warn: -3.1, mild: -1.0 };
+// 判定ルール：6時間ごと（3/9/15/21時区切り）の区間を、
+// 区間の12時間前〜区間の6時間後（計24時間）の海面気圧の変化で評価
+const TH = { alert: -7.8, warn: -6.2, mild: -1.0 };
 const LV_RANK = { calm: 0, mild: 1, warn: 2, alert: 3 };
-function blockLevel(d12, d6) {
-  if (d12 <= TH.alert) return "alert";
-  if (d12 <= TH.warn) return "warn";
-  if (d12 <= TH.mild || d6 <= TH.mild) return "mild";
+function blockLevel(d24) {
+  if (d24 <= TH.alert) return "alert";
+  if (d24 <= TH.warn) return "warn";
+  if (d24 <= TH.mild) return "mild";
   return "calm";
 }
 let blocks = [];
@@ -240,8 +241,8 @@ function computeBlocks() {
   for (let i = 0; i < n - 1; i++) {
     if (series[i].t.getHours() % 6 !== 3) continue;
     const j = Math.min(i + 6, n - 1);
-    const d6 = P(j) - P(i), d12 = P(j + 3) - P(i - 3);
-    blocks.push({ i, j, d6, d12, lv: blockLevel(d12, d6) });
+    const d6 = P(j) - P(i), d12 = P(j + 6) - P(i - 12);   // d12 = 判定用の24時間変化
+    blocks.push({ i, j, d6, d12, lv: blockLevel(d12) });
   }
 }
 const blockAt = idx => blocks.find(b => b.i <= idx && idx < b.j) || null;
@@ -389,7 +390,7 @@ function analyze() {
   $("stBadge").textContent = L.mark;
   $("stTitle").textContent = `今後24時間：${L.name}`;
   $("stDetail").textContent = top && lv !== "calm"
-    ? `いちばん注意が必要なのは ${series[top.i].t.getMonth() + 1}/${series[top.i].t.getDate()} ${hh(top.i)}〜${hh(top.j)}時（前後12時間で ${top.d12.toFixed(1)} hPa）`
+    ? `いちばん注意が必要なのは ${series[top.i].t.getMonth() + 1}/${series[top.i].t.getDate()} ${hh(top.i)}〜${hh(top.j)}時（24時間で ${top.d12.toFixed(1)} hPa）`
     : "大きな気圧低下は見込まれません";
 }
 
@@ -514,7 +515,7 @@ function renderDays() {
     return `<div class="day lv-${lv}" style="background:var(--${lv}-soft)">
       <div class="h">${k ? "明日" : "今日"} ${dt.getMonth() + 1}/${dt.getDate()}（${WD[dt.getDay()]}）</div>
       <div class="big" style="color:${LV_HEX[lv]}">${LV[lv].name}</div>
-      <div class="muted">最大の下降 ${worst.toFixed(1)} hPa / 12h</div>
+      <div class="muted">最大の下降 ${worst.toFixed(1)} hPa / 24h</div>
       <div class="muted">${Math.min(...temps).toFixed(0)}〜${Math.max(...temps).toFixed(0)}℃</div></div>`;
   }).join("");
 }
