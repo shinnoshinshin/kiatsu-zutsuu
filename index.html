@@ -189,7 +189,7 @@
     </div>
   </section>
 
-  <div class="muted foot">気象データ: Open-Meteo.com ／ 記録はこの端末のブラウザ内だけに保存されます。医療的な診断ではありません。</div>
+  <div class="muted foot">判定: 6時間ごとに、前後12時間の海面気圧の下がり幅で評価（−3.1で注意、−4.2で警戒）<br>気象データ: Open-Meteo.com ／ 記録はこの端末のブラウザ内だけに保存されます。医療的な診断ではありません。</div>
 </main>
 
 <nav>
@@ -224,7 +224,28 @@ const LV = {
   warn:  { name:"注意",     mark:"!", color:"var(--warn)" },
   alert: { name:"警戒",     mark:"!!", color:"var(--alert)" },
 };
-const levelOf = d => d <= -4 ? "alert" : d <= -2 ? "warn" : d <= -1 ? "mild" : "calm";
+// 判定ルール：6時間ごと（3/9/15/21時区切り）の区間を、区間をはさむ12時間の気圧変化で評価
+const TH = { alert: -4.2, warn: -3.1, mild: -1.0 };
+const LV_RANK = { calm: 0, mild: 1, warn: 2, alert: 3 };
+function blockLevel(d12, d6) {
+  if (d12 <= TH.alert) return "alert";
+  if (d12 <= TH.warn) return "warn";
+  if (d12 <= TH.mild || d6 <= TH.mild) return "mild";
+  return "calm";
+}
+let blocks = [];
+function computeBlocks() {
+  const n = series.length, P = i => series[Math.min(Math.max(i, 0), n - 1)].p;
+  blocks = [];
+  for (let i = 0; i < n - 1; i++) {
+    if (series[i].t.getHours() % 6 !== 3) continue;
+    const j = Math.min(i + 6, n - 1);
+    const d6 = P(j) - P(i), d12 = P(j + 3) - P(i - 3);
+    blocks.push({ i, j, d6, d12, lv: blockLevel(d12, d6) });
+  }
+}
+const blockAt = idx => blocks.find(b => b.i <= idx && idx < b.j) || null;
+const hh = i => String(series[i].t.getHours()).padStart(2, "0");
 const LV_HEX = { calm:"#6fae8a", mild:"#d9b53f", warn:"#ee9a3a", alert:"#e2574f" };
 const SEV_HEX = ["#b9b6c2","#d9b53f","#ee9a3a","#e8754a","#e2574f","#b8403a"];
 
@@ -335,10 +356,11 @@ function pick(c) { setPlace(c.latitude, c.longitude, c.name); }
 async function fetchForecast(lat, lon) {
   $("stTitle").textContent = "読み込み中…"; $("stDetail").textContent = "";
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
-              `&hourly=surface_pressure,temperature_2m,weather_code&past_days=2&forecast_days=3&timezone=auto`;
+              `&hourly=pressure_msl,temperature_2m,weather_code&past_days=2&forecast_days=3&timezone=auto`;
   try {
     const d = await fetch(url).then(r => r.json());
-    series = d.hourly.time.map((t, i) => ({ t: new Date(t), p: d.hourly.surface_pressure[i], temp: d.hourly.temperature_2m[i], wc: d.hourly.weather_code[i] }));
+    series = d.hourly.time.map((t, i) => ({ t: new Date(t), p: d.hourly.pressure_msl[i], temp: d.hourly.temperature_2m[i], wc: d.hourly.weather_code[i] }));
+    computeBlocks();
     selIdx = nowIdx();
     analyze(); drawChart(); renderReadout(); renderLog(); renderHourly(); renderDays(); analyzeLog(); notifyIfNeeded();
     requestAnimationFrame(() => scrollToIdx(selIdx, false));
@@ -357,17 +379,17 @@ const drop3 = i => i >= 3 ? series[i].p - series[i - 3].p : null;
 
 // ---- 今後24時間の判定 ----
 function analyze() {
-  const now = Date.now();
-  const fut = series.filter(s => s.t >= now - 3600e3 && s.t <= now + 24 * 3600e3);
-  let worst = 0, at = null;
-  for (let i = 3; i < fut.length; i++) { const d = fut[i].p - fut[i - 3].p; if (d < worst) { worst = d; at = fut[i].t; } }
-  window.worst3 = worst;
-  const lv = levelOf(worst), L = LV[lv];
+  const now = Date.now(), ni = nowIdx();
+  const ahead = blocks.filter(b => b.j > ni && series[b.i].t <= now + 24 * 3600e3);
+  let top = null;
+  for (const b of ahead) if (!top || LV_RANK[b.lv] > LV_RANK[top.lv] || (b.lv === top.lv && b.d12 < top.d12)) top = b;
+  const lv = top ? top.lv : "calm", L = LV[lv];
+  window.worstLv = LV_RANK[lv];
   $("status").className = "status lv-" + lv;
   $("stBadge").textContent = L.mark;
   $("stTitle").textContent = `今後24時間：${L.name}`;
-  $("stDetail").textContent = at && worst <= -1
-    ? `いちばん下がるのは ${fmt(at)} ごろ（3時間で ${worst.toFixed(1)} hPa）`
+  $("stDetail").textContent = top && lv !== "calm"
+    ? `いちばん注意が必要なのは ${series[top.i].t.getMonth() + 1}/${series[top.i].t.getDate()} ${hh(top.i)}〜${hh(top.j)}時（前後12時間で ${top.d12.toFixed(1)} hPa）`
     : "大きな気圧低下は見込まれません";
 }
 
@@ -376,8 +398,8 @@ function renderReadout() {
   const s = series[selIdx]; if (!s) return;
   $("roDate").innerHTML = `${s.t.getFullYear()}<b>${s.t.getMonth() + 1}/${s.t.getDate()}（${WD[s.t.getDay()]}）</b>`;
   $("roHour").innerHTML = `${s.t.getHours()}<span>時</span>`;
-  const d = drop3(selIdx);
-  const ds = d == null ? "" : `<br><span class="muted">3時間前から</span> <b class="delta ${d < 0 ? "down" : "up"}">${d > 0 ? "+" : ""}${d.toFixed(1)}</b>`;
+  const b = blockAt(selIdx);
+  const ds = !b ? "" : `<br><span class="muted">${hh(b.i)}〜${hh(b.j)}時</span> <b class="delta ${b.d6 < 0 ? "down" : "up"}">${b.d6 > 0 ? "+" : ""}${b.d6.toFixed(1)}</b>`;
   $("roVals").innerHTML = `気温 <b>${s.temp.toFixed(0)}</b>℃<br>気圧 <b>${s.p.toFixed(1)}</b>${ds}`;
 }
 
@@ -404,12 +426,11 @@ function drawChart() {
   }
   $("yaxis").innerHTML = ticks;
 
-  // 3時間ごとの警戒ブロック
-  for (let i = 0; i + 3 < n; i++) {
-    if (series[i].t.getHours() % 3) continue;
-    const d = series[i + 3].p - series[i].p, lv = levelOf(d);
+  // 6時間ごとの警戒ブロック
+  for (const b of blocks) {
+    const lv = b.lv, d = b.d6;
     if (lv === "calm") continue;
-    const x0 = x(i) - HW / 2 + 2, w = 3 * HW - 4, c = LV_HEX[lv];
+    const x0 = x(b.i) + 2, w = x(b.j) - x(b.i) - 4, c = LV_HEX[lv];
     s += `<rect x="${x0}" y="${R.plotT - 6}" width="${w}" height="${R.plotB - R.plotT + 6}" fill="${c}" fill-opacity=".08" rx="10"/>`;
     s += `<rect x="${x0}" y="${R.risk}" width="${w}" height="${R.riskH}" rx="12" fill="${c}" fill-opacity=".9"/>`;
     s += `<text x="${x0 + w / 2}" y="${R.risk + 17}" text-anchor="middle" font-size="11" font-weight="700" fill="#fff">${LV[lv].name}</text>`;
@@ -474,7 +495,7 @@ function renderHourly() {
   const now = Date.now();
   const idx = series.map((q, i) => i).filter(i => series[i].t.getHours() % 3 === 0 && series[i].t >= now - 3600e3 && series[i].t <= now + 24 * 3600e3);
   $("hourly").innerHTML = idx.map(i => {
-    const q = series[i], d = i + 3 < series.length ? series[i + 3].p - q.p : 0, lv = levelOf(d);
+    const q = series[i], b = blockAt(i), lv = b ? b.lv : "calm";
     return `<div class="hcell"><div>${q.t.getDate()}日 ${q.t.getHours()}時</div><div class="w">${wIcon(q.wc)}</div>
       <div>${q.temp.toFixed(0)}℃</div><div class="p">${q.p.toFixed(0)}</div>
       <div class="chip" style="background:${LV_HEX[lv]}">${LV[lv].name}</div></div>`;
@@ -486,12 +507,14 @@ function renderDays() {
     const d0 = +today + k * 86400e3, d1 = d0 + 86400e3;
     const idx = series.map((q, i) => i).filter(i => series[i].t >= d0 && series[i].t < d1);
     if (!idx.length) return "";
-    let worst = 0; idx.forEach(i => { const d = drop3(i); if (d != null && d < worst) worst = d; });
-    const temps = idx.map(i => series[i].temp), lv = levelOf(worst), dt = new Date(d0);
+    const bs = blocks.filter(b => idx.includes(b.i));
+    let lv = "calm", worst = 0;
+    bs.forEach(b => { if (LV_RANK[b.lv] > LV_RANK[lv]) lv = b.lv; if (b.d12 < worst) worst = b.d12; });
+    const temps = idx.map(i => series[i].temp), dt = new Date(d0);
     return `<div class="day lv-${lv}" style="background:var(--${lv}-soft)">
       <div class="h">${k ? "明日" : "今日"} ${dt.getMonth() + 1}/${dt.getDate()}（${WD[dt.getDay()]}）</div>
       <div class="big" style="color:${LV_HEX[lv]}">${LV[lv].name}</div>
-      <div class="muted">最大の下降 ${worst.toFixed(1)} hPa / 3h</div>
+      <div class="muted">最大の下降 ${worst.toFixed(1)} hPa / 12h</div>
       <div class="muted">${Math.min(...temps).toFixed(0)}〜${Math.max(...temps).toFixed(0)}℃</div></div>`;
   }).join("");
 }
@@ -522,7 +545,7 @@ $("notifyBtn").onclick = async () => {
 function notifyIfNeeded() {
   if (!("Notification" in window) || localStorage.getItem("zutsuu-notify") !== "1" || Notification.permission !== "granted") return;
   const today = new Date().toDateString();
-  if (window.worst3 <= -2 && localStorage.getItem("zutsuu-notified") !== today) {
+  if (window.worstLv >= 2 &&localStorage.getItem("zutsuu-notified") !== today) {
     new Notification("気圧が下がります", { body: $("stDetail").textContent });
     localStorage.setItem("zutsuu-notified", today);
   }
