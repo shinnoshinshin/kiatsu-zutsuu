@@ -267,20 +267,49 @@ const sheet = $("sheet");
 $("openLoc").onclick = () => sheet.classList.add("on");
 $("closeLoc").onclick = () => sheet.classList.remove("on");
 sheet.onclick = e => { if (e.target === sheet) sheet.classList.remove("on"); };
-function setPlace(lat, lon, name) {
-  localStorage.setItem(LOC_KEY, JSON.stringify({ lat, lon, name }));
-  $("placeName").textContent = name;
+function showPlace(name, cur) {
+  $("placeName").textContent = cur ? `📍 ${name}（現在地）` : name;
+}
+function setPlace(lat, lon, name, cur = false) {
+  localStorage.setItem(LOC_KEY, JSON.stringify({ lat, lon, name, cur }));
+  showPlace(name, cur);
   sheet.classList.remove("on");
   fetchForecast(lat, lon);
 }
-$("locBtn").onclick = () => {
-  if (!navigator.geolocation) return $("locMsg").textContent = "このブラウザは位置情報に対応していません";
-  $("locMsg").textContent = "現在地を取得中…";
-  navigator.geolocation.getCurrentPosition(
-    pos => { $("locMsg").textContent = ""; setPlace(pos.coords.latitude, pos.coords.longitude, "現在地"); },
-    err => $("locMsg").textContent = "現在地を取得できませんでした（" + err.message + "）。地名で検索してください。",
-    { timeout: 10000, maximumAge: 600000 });
-};
+
+// 緯度経度 → 市区町村名（国土地理院の逆ジオコーダ＋市区町村コード表）
+let muniTable = null;
+async function cityName(lat, lon) {
+  const u = new URL("https://mreversegeocoder.gsi.go.jp/reverse-geocoder/LonLatToAddress");
+  u.searchParams.set("lat", lat); u.searchParams.set("lon", lon);
+  const j = await fetch(u).then(r => r.json());
+  const code = j.results && j.results.muniCd;
+  if (!code) return null;
+  muniTable ??= await fetch("https://maps.gsi.go.jp/js/muni.js").then(r => r.text());
+  const m = muniTable.match(new RegExp(`"0?${String(+code)}"\\]\\s*=\\s*'([^']*)'`));
+  if (!m) return null;
+  const parts = m[1].split(",")[3].split(/[\s　]+/).filter(Boolean);   // 例: ["横浜市","西区"] / ["愛甲郡","愛川町"]
+  if (parts.length > 1 && parts[0].endsWith("郡")) parts.shift();
+  return parts.join("");
+}
+
+function useCurrentLocation(silent) {
+  if (!navigator.geolocation) { if (!silent) $("locMsg").textContent = "このブラウザは位置情報に対応していません"; return; }
+  if (!silent) $("locMsg").textContent = "現在地を取得中…";
+  navigator.geolocation.getCurrentPosition(async pos => {
+    const { latitude: lat, longitude: lon } = pos.coords;
+    $("locMsg").textContent = "";
+    let prev = null; try { prev = JSON.parse(localStorage.getItem(LOC_KEY) || "null"); } catch {}
+    setPlace(lat, lon, prev && prev.cur ? prev.name : "現在地", true);
+    try {
+      const name = await cityName(lat, lon);
+      if (name) { localStorage.setItem(LOC_KEY, JSON.stringify({ lat, lon, name, cur: true })); showPlace(name, true); }
+    } catch {}
+  }, err => {
+    if (!silent) $("locMsg").textContent = "現在地を取得できませんでした（" + err.message + "）。地名で検索してください。";
+  }, { timeout: 10000, maximumAge: 300000 });
+}
+$("locBtn").onclick = () => useCurrentLocation(false);
 $("cityBtn").onclick = searchCity;
 $("cityInput").addEventListener("keydown", e => { if (e.key === "Enter") searchCity(); });
 async function searchCity() {
@@ -502,8 +531,10 @@ function notifyIfNeeded() {
 // ---- 起動 ----
 renderLog(); analyzeLog();
 let saved = null; try { saved = JSON.parse(localStorage.getItem(LOC_KEY) || "null"); } catch {}
-if (saved) setPlace(saved.lat, saved.lon, saved.name);
-else sheet.classList.add("on");
+if (saved) {
+  setPlace(saved.lat, saved.lon, saved.name, !!saved.cur);
+  if (saved.cur || saved.name === "現在地") useCurrentLocation(true);   // 開くたびに現在地を更新
+} else sheet.classList.add("on");
 </script>
 </body>
 </html>
